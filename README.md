@@ -38,7 +38,8 @@
 
 ### 1. 用打包好的 exe
 
-从 Releases 下载 `HSF均质表自动填写工具_精简版.exe`，双击运行，把源表与模板拖进窗口即可。
+从 [Releases](../../releases) 下载精简版 exe（`HSF-Homogenization-Filler-*-slim.exe`），
+双击运行，把源表与模板拖进窗口即可。下载后改名成什么都不影响运行。
 
 也支持命令行批处理：
 
