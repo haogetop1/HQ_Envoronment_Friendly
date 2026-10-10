@@ -1,0 +1,15 @@
+# 统一用 LF，避免跨平台协作时整文件 diff
+* text=auto eol=lf
+
+# 二进制（不要做行尾转换）
+*.exe   binary
+*.xls   binary
+*.xlsx  binary
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+
+# 让 GitHub 按语言统计
+*.py    text diff=python
+*.spec  text diff=python

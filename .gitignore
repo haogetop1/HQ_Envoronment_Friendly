@@ -1,0 +1,57 @@
+# ============================================================
+# 重要：本工具处理的源表、检测报告与输出产物均含真实材料数据，
+#      一律不入库。下面每一条都是有意为之，不要删。
+# ============================================================
+
+# ---------- 源表 / 模板 / 报告（含真实数据，绝不提交）----------
+*.xls
+*.xlsx
+*.pdf
+*.doc
+*.docx
+!docs/*.md
+
+# ---------- 运行产物 ----------
+_probe*/
+_exe*/
+_final*/
+_full*/
+_slim*/
+_test*/
+_negtest*/
+_sample*/
+样例输出*/
+build/
+dist/
+*.exe
+processing_log.txt
+_汇总报告.xlsx
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+envs/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---------- 打包 / 缓存 ----------
+*.manifest
+*.spec.bak
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
