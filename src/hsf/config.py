@@ -29,6 +29,12 @@ class Settings:
     # 材料名称取自哪一列：'model'=D列(材料名称/型号) 'vendor'=C列(材料厂家) 'both'=C+D
     name_source: str = 'model'
 
+    # 报告图标（内嵌 PDF）归属行：'bottom' = 用图标底边所在行，'top' = 用顶边。
+    # 2026-10-12 需求：图标压在两个 K 合并格之间时必须按底边判——
+    # RR12347 的两份镍浆料两份报告顶边在第 35 行、底边在第 36 行，
+    # 实际属于第 36 行的 Nickel；按顶边会把镍的报告算给 Ceramics。
+    pdf_row_anchor: str = 'bottom'
+
     # CAS 为空时是否判定为保密
     secret_when_cas_empty: bool = True
 

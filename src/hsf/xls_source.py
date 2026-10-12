@@ -8,7 +8,7 @@ import xlrd
 
 from .config import Settings
 from .ole_extract import EmbeddedObject, is_pdf
-from .util import clean_cas
+from .util import clean_cas, material_display, remove_spaces
 
 
 @dataclass
@@ -30,9 +30,23 @@ class MaterialBlock:
     components: list = field(default_factory=list)
     hsf_objs: list = field(default_factory=list)     # EmbeddedObject
     msds_objs: list = field(default_factory=list)
+    # 2026-10-12：由「同一个 M 格内同名同 CAS」的多个 K 块合并而来时，
+    # 这里记每个成员的原始行区间；单块时为空列表。
+    merged_rows: list = field(default_factory=list)
+    # 报告图标跨两个 K 格时，归属变更的说明（接收方与失去方各记一条）
+    attr_notes: list = field(default_factory=list)
+
+    @property
+    def is_merged(self) -> bool:
+        return len(self.merged_rows) > 1
+
+    def _label(self, a: int, b: int) -> str:
+        return f'{a + 1}-{b + 1}' if b > a else str(a + 1)
 
     @property
     def excel_rows(self) -> str:
+        if self.merged_rows:
+            return '、'.join(self._label(a, b) for a, b in self.merged_rows)
         return f'{self.row_start + 1}-{self.row_end + 1}'
 
 
@@ -114,14 +128,38 @@ class SourceSheet:
                 r += 1
         return blocks
 
+    # ---------------- 名称
+    def material_name(self, block: MaterialBlock) -> str:
+        """材料名称主体（不含 RR 前缀），取自设置指定的那一列。
+
+        默认 ``name_source='model'`` = **D 列（材料名称/型号）**，也是
+        「同名同 CAS 合并」用来判同名的那一列。D 列里的括号内容不取
+        （Die1(EMMJR68) -> Die1），与输出表 B2 及文件名保持一致。
+        """
+        st = self.st
+        src = (st.name_source or 'model').lower()
+        model = material_display(self.text(block.row_start, st.columns.material_model))
+        vendor = material_display(self.text(block.row_start, st.columns.material_name))
+        if src == 'vendor':
+            return vendor or model
+        if src == 'both':
+            return material_display(f'{vendor}-{model}')
+        return model or vendor
+
     # ---------------- 物料块
-    def build_blocks(self, objs: list[EmbeddedObject]):
+    def build_blocks(self, objs: list[EmbeddedObject], m_anchor=None):
         """按 K 列合并格切块，返回 (blocks, skipped)。
 
         空块（不出表、不计入结果）判定，任一命中即跳过：
           A. 该 K 列单元格内没有任何成分行（F/G 列全空）
           B. 该 K 列单元格内没有内嵌 HSF 报告——没有报告就没有测试结果
              （对应需求「提取不到 PDF 就不出结果」）
+
+        ``m_anchor``：callable(row) -> 该行所属 M 列合并格的起始行。
+        给了它就启用「同名同 CAS 合并」（见 ``_merge_same_material``）：
+        合并必须发生在空块剔除**之前**，否则像 RR12347 的 D36 那样
+        「自己那格没有报告、但和隔壁同名同 CAS」的行会在合并前就被丢掉，
+        重量凭空少算。
 
         MSDS 不受影响：它按 M 列合并格独立另存，不依赖物料块。
         """
@@ -145,20 +183,14 @@ class SourceSheet:
             if not comps:
                 skipped.append((rs, re_, 'K 列单元格内没有成分行'))
                 continue
-            blocks.append(MaterialBlock(len(blocks), rs, re_,
-                                        name_raw, '', '', comps))
+            b = MaterialBlock(len(blocks), rs, re_, name_raw, '', '', comps)
+            b.name = self.material_name(b)
+            blocks.append(b)
 
-        # PDF 归属
-        for o in objs:
-            if not is_pdf(o):
-                continue
-            for b in blocks:
-                if b.row_start <= o.row <= b.row_end:
-                    if o.col == st.columns.hsf:
-                        b.hsf_objs.append(o)
-                    elif o.col == st.columns.msds:
-                        b.msds_objs.append(o)
-                    break
+        self._assign_pdfs(blocks, objs)
+
+        if m_anchor is not None:
+            blocks = self._merge_same_material(blocks, m_anchor)
 
         # 空块剔除：没有 HSF 报告的块不出表
         kept: list[MaterialBlock] = []
@@ -175,6 +207,113 @@ class SourceSheet:
             b.msds_objs.sort(key=lambda o: (o.row, o.col, o.obj_id))
         skipped.sort()
         return kept, skipped
+
+    # ---------------- 内嵌 PDF 归属
+    def _assign_pdfs(self, blocks: list[MaterialBlock],
+                     objs: list[EmbeddedObject]):
+        """把内嵌 PDF 挂到所属 K 块上。
+
+        归属行默认取图标**底边**所在行（Settings.pdf_row_anchor='bottom'）。
+        2026-10-12：图标是浮的，压在两格之间时只看顶边会挂错——
+        RR12347 的两份镍浆料两份报告（Sample Name 就是 Nickel paste）
+        顶边在第 35 行（Ceramics 的 K34:K35）、底边在第 36 行（Nickel），
+        按顶边会把镍的报告算给陶瓷。跨格时必须留痕，别静默搬走。
+        """
+        st = self.st
+        bottom = (getattr(st, 'pdf_row_anchor', 'bottom') or 'bottom').lower() != 'top'
+
+        def owner(row: int):
+            for b in blocks:
+                if b.row_start <= row <= b.row_end:
+                    return b
+            return None
+
+        def label(b: MaterialBlock) -> str:
+            nm = self.text(b.row_start, st.columns.material_model).strip()
+            return f'{b.row_start + 1} 行（{nm}）' if nm else f'{b.row_start + 1} 行'
+
+        for o in objs:
+            if not is_pdf(o):
+                continue
+            anchor_row = o.bottom_row if bottom else o.row
+            target = owner(anchor_row)
+            if target is None:
+                continue
+            if o.col == st.columns.hsf:
+                target.hsf_objs.append(o)
+            elif o.col == st.columns.msds:
+                target.msds_objs.append(o)
+            else:
+                continue
+
+            top = owner(o.row)
+            if top is None or top is target:
+                continue
+            target.attr_notes.append(
+                f'报告 {o.file_name} 的图标压在 {top.row_start + 1}-'
+                f'{top.row_end + 1} 行与 {target.row_start + 1} 行之间，'
+                f'已按图标底边归入 {label(target)}')
+            top.attr_notes.append(
+                f'报告 {o.file_name} 的图标压在本格（{top.row_start + 1}-'
+                f'{top.row_end + 1} 行）与下一格之间，已按图标底边归入 '
+                f'{label(target)}，本格不计入')
+
+    # ---------------- 同名同 CAS 合并
+    def _merge_same_material(self, blocks: list[MaterialBlock],
+                             m_anchor) -> list[MaterialBlock]:
+        """同一个 M 列合并格内，D 列名称相同且 G 列 CAS 序列相同的块合并成一块。
+
+        2026-10-12 需求：RR12347 的 D36/D38 两行都叫 Nickel、G 列同为
+        7440-02-0，本应是一份均质表。旧逻辑当成两个材料出表，而 D36 因为
+        自己那格没有报告被整块丢弃——0.02142 的重量直接消失。
+
+        判同名的列就是输出表 B2 用的那一列（Settings.name_source，默认 D 列
+        「材料名称/型号」）。**不能拿 C 列（材料厂家）当键**——C 列常常是横跨
+        整段的合并格（整段都是同一个厂家名），拿它当键等于不判同名。
+
+        合并口径：
+          - 成分：两块成分行拼接，同 CAS 的重量**相加**，再整体归一化到 100%
+          - 报告：两块的 HSF 全并进来，合并了几份就写几个报告编号
+          - MSDS：仍跟随所属 M 格，只出一份（与 HSF 一一对应）
+          - 名称：取第一块的（后续 _dedup 不会再给它加 -1）
+
+        要求 CAS 序列**完全一致**才算同一种材料。名字相同但成分不同的
+        保持各自出表（名称照旧加 -1 去重），不能硬合。
+        """
+        grouped: dict = {}
+        order: list = []
+        for b in blocks:
+            key = (m_anchor(b.row_start),
+                   remove_spaces(b.name or b.name_raw or ''),
+                   tuple(clean_cas(c.cas) for c in b.components))
+            if key not in grouped:
+                grouped[key] = []
+                order.append(key)
+            grouped[key].append(b)
+
+        out: list[MaterialBlock] = []
+        for key in order:
+            members = grouped[key]
+            out.append(members[0] if len(members) == 1 else self._merge_blocks(members))
+        return out
+
+    def _merge_blocks(self, members: list[MaterialBlock]) -> MaterialBlock:
+        first = members[0]
+        comps, hsf, msds, notes = [], [], [], []
+        for b in members:
+            comps.extend(b.components)
+            hsf.extend(b.hsf_objs)
+            msds.extend(b.msds_objs)
+            notes.extend(b.attr_notes)
+        merged = MaterialBlock(
+            index=first.index,
+            row_start=min(b.row_start for b in members),
+            row_end=max(b.row_end for b in members),
+            name_raw=first.name_raw, name=first.name, display=first.display,
+            components=comps, hsf_objs=hsf, msds_objs=msds)
+        merged.merged_rows = [(b.row_start, b.row_end) for b in members]
+        merged.attr_notes = notes
+        return merged
 
 
 def merge_components(components: list[Component]) -> tuple:

@@ -9,6 +9,7 @@
   3. OBJ 记录里不含位置；真实位置在 Escher（MSODRAWING, 0x00EC）中：
      SpContainer(0xF004) -> SP(0xF00A, 8字节: spid+grbit) + OPT(0xF00B)
      + ClientAnchor(0xF010, 18字节: flag + colL/dxL/rwT/dyT/colR/dxR/rwB/dyB)。
+     顶边行 rwT 与底边行 rwB 都要留：图标压在两个合并格之间时靠底边判归属。
   4. SpContainer 的出场顺序与 OBJ 记录的出场顺序一一对应，据此配对。
 """
 from __future__ import annotations
@@ -27,9 +28,16 @@ MBD_MASK = 0x80000000
 class EmbeddedObject:
     obj_id: int
     col: int          # 0-based 列号（锚点左上角）
-    row: int          # 0-based 行号（锚点左上角）
+    row: int          # 0-based 行号（锚点左上角 = 顶边所在行）
     file_name: str    # 内嵌时记录的原始文件名
     data: bytes       # 文件正文
+    row_end: int = -1  # 0-based 行号（锚点右下角 = 底边所在行），-1 表示未知
+
+    @property
+    def bottom_row(self) -> int:
+        """图标底边所在行；解析不到底边时退回顶边。"""
+        return self.row_end if self.row_end >= 0 else self.row
+
 
 
 def _iter_biff_records(blob: bytes):
@@ -96,7 +104,7 @@ def extract_embedded_objects(xls_path: str) -> list[EmbeddedObject]:
         esc: list = []
         _walk_escher(bytes(buf), 0, len(buf), esc)
 
-        anchors = []                                   # [(spid, col, row)]
+        anchors = []                                   # [(spid, col, row, row_end)]
         for i, (off, fbt, cb, vi, body) in enumerate(esc):
             if fbt != 0xF004:                          # SpContainer
                 continue
@@ -110,8 +118,13 @@ def extract_embedded_objects(xls_path: str) -> list[EmbeddedObject]:
             if not sp or not anchor or len(anchor[4]) != 18:
                 continue
             spid = struct.unpack('<I', sp[4][:4])[0]
-            _flag, colL, _dxL, rwT = struct.unpack('<4h', anchor[4][:8])
-            anchors.append((spid, colL, rwT))
+            # ClientAnchor = flag(2B) + colL,dxL,rwT,dyT,colR,dxR,rwB,dyB（各 2B）
+            # rwB 是图标底边所在行。压在两个 K 合并格之间的图标必须靠它判归属
+            # （2026-10-12 需求：镍浆料（nickel paste）两份报告的顶边在第 35 行、底边在第
+            # 36 行，实际属于第 36 行的 Nickel，不是 Ceramics）。
+            _flag, colL, _dxL, rwT, _dyT, _colR, _dxR, rwB, _dyB = struct.unpack(
+                '<9h', anchor[4])
+            anchors.append((spid, colL, rwT, rwB))
 
         # --- 3) 按顺序配对（形状数应与 OBJ 数一致）
         pairs = []
@@ -120,14 +133,14 @@ def extract_embedded_objects(xls_path: str) -> list[EmbeddedObject]:
         else:
             # 退化：以 spid 相对首个形状 id 的差值为对象 id 作兜底
             base = anchors[0][0] if anchors else 0
-            mapping = {spid - base: (spid, c, r) for spid, c, r in anchors}
+            mapping = {spid - base: (spid, c, r, rb) for spid, c, r, rb in anchors}
             for oid in obj_ids:
                 if oid in mapping:
                     pairs.append((oid, mapping[oid]))
 
         # --- 4) 取正文
         results: list[EmbeddedObject] = []
-        for obj_id, (spid, col, row) in pairs:
+        for obj_id, (spid, col, row, row_end) in pairs:
             storage = 'MBD%08X' % (MBD_MASK | obj_id)
             stream = next((e for e in entries
                            if len(e) == 2 and e[0] == storage and e[-1].endswith('Ole10Native')), None)
@@ -138,7 +151,7 @@ def extract_embedded_objects(xls_path: str) -> list[EmbeddedObject]:
             except Exception:
                 continue
             file_name, data = _parse_ole10native(raw)
-            results.append(EmbeddedObject(obj_id, col, row, file_name, data))
+            results.append(EmbeddedObject(obj_id, col, row, file_name, data, row_end))
         return results
     finally:
         ole.close()

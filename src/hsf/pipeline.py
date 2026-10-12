@@ -13,6 +13,13 @@
 却只有 1 份 MSDS），旧逻辑只出 1 份，导致 MSDS 与 HSF 对不上号。
 现在每个 K 块都按自己所属 M 格取同一份 PDF 另存，内容相同、名称各异，
 份数与 HSF 严格一致。
+
+2026-10-12 v1.4：
+  1. 报告图标归属改按**底边**所在行（Settings.pdf_row_anchor），
+     压在两格之间的图标不再错挂，且接收方/失去方都写告警。
+  2. 同一个 M 格内 D 列名称相同、G 列 CAS 也相同的多个 K 块**合并成一块**：
+     重量相加后重新归一化到 100%，HSF 报告全并进来、几个编号写几行。
+     合并发生在空块剔除之前，否则「自己那格没报告」的行会被先丢掉。
 """
 from __future__ import annotations
 
@@ -46,15 +53,10 @@ def _material_name(sheet: SourceSheet, block: MaterialBlock, st: Settings) -> st
     """均质名称主体（不含 RR 前缀）。
 
     2026-08-31 需求：D 列里的括号内容不取，如 Die1(EMMJR68) -> Die1。
+    2026-10-12：实现挪到 SourceSheet.material_name——build_blocks 里也要用
+    同一个名称做「同名同 CAS 合并」的键，两处必须是同一套口径。
     """
-    src = (st.name_source or 'model').lower()
-    model = material_display(sheet.text(block.row_start, st.columns.material_model))
-    vendor = material_display(sheet.text(block.row_start, st.columns.material_name))
-    if src == 'vendor':
-        return vendor or model
-    if src == 'both':
-        return material_display(f'{vendor}-{model}')
-    return model or vendor
+    return sheet.material_name(block)
 
 
 def _dedup(names: list[str]) -> list[str]:
@@ -211,12 +213,41 @@ class Pipeline:
             self.res.errors.append('源 .xls 工作表读取失败')
             return self.res
 
-        blocks, skipped = sheet.build_blocks(objs)
+        # M 列合并格清单：既用于「同名同 CAS 合并」的前提判断，也用于给每个
+        # 材料块取 MSDS。这里必须包含没有内嵌 MSDS 的格子——只要行落在同一个
+        # M 格里就该合并，缺 MSDS 是另一回事。
+        r0, r1 = sheet.detect_data_range()
+        m_cells_all = sheet.distinct_cells(st.columns.msds, r0, r1)
+
+        def m_anchor(row: int):
+            for (rs, re_) in m_cells_all:
+                if rs <= row <= re_:
+                    return rs
+            return None
+
+        try:
+            blocks, skipped = sheet.build_blocks(objs, m_anchor=m_anchor)
+        except Exception:
+            # 物料块划分/合并里的任何异常都不该让进程炸掉——GUI 下只会看到
+            # 一个空输出目录。宁可给出明确错误，也不要静默半成品。
+            self.log(traceback.format_exc(), 'ERROR')
+            self.res.errors.append('物料块划分失败（列位配置或源表结构异常）')
+            return self.res
         self.res.skipped = skipped
-        n_cells = len(blocks) + len(skipped)
-        self.log(f'K 列合并格 {n_cells} 个：有效 {len(blocks)} 个，空块 {len(skipped)} 个')
+        n_cells = sum(len(b.merged_rows) or 1 for b in blocks) + len(skipped)
+        n_merged = sum(1 for b in blocks if b.is_merged)
+        self.log(f'K 列合并格 {n_cells} 个：有效 {len(blocks)} 个'
+                 + (f'（其中 {n_merged} 个由多个格合并而成）' if n_merged else '')
+                 + f'，空块 {len(skipped)} 个')
         for rs, re_, reason in skipped:
             self.log(f'跳过空块 行 {rs + 1}-{re_ + 1}（{reason}），不出表', 'WARN')
+        for b in blocks:
+            if not b.is_merged:
+                continue
+            self.log(f'同名同 CAS 合并：源表行 {b.excel_rows} 同属一个 M 列合并格，'
+                     f'D 列名称与 G 列 CAS 完全一致，已合并为一块——'
+                     f'重量相加后重新归一化到 100%，{len(b.hsf_objs)} 份 HSF 报告'
+                     f'合并成一份（报告编号照写 {len(b.hsf_objs)} 个）')
         self.log(f'将生成 {len(blocks)} 份表')
         if not blocks:
             self.res.errors.append(
@@ -228,9 +259,10 @@ class Pipeline:
 
         # M 列合并格 -> 该格内嵌的 MSDS PDF。K 块按行号查表找到自己那份，
         # 从而实现「每个 K 块一份 MSDS」（2026-08-31 v1.3）。
-        r0, r1 = sheet.detect_data_range()
+        # 2026-10-12：M 格清单在 build_blocks 之前就要算好——它同时是
+        # 「同名同 CAS 合并」的前提条件（必须同一个 M 格内才合并）。
         msds_cells = []
-        for (rs, re_) in sheet.distinct_cells(st.columns.msds, r0, r1):
+        for (rs, re_) in m_cells_all:
             group = [o for o in pdfs if o.col == st.columns.msds
                      and rs <= o.row <= re_]
             if group:
@@ -267,8 +299,24 @@ class Pipeline:
         warns = rec.warnings
 
         # 成分：先按 CAS 合并，再归一化
+        # 2026-10-12：合并块（同名同 CAS 的多个 K 格）在这里天然处理正确——
+        # 各成员成分行拼在一起后，merge_components 会把相同 CAS 的重量相加，
+        # normalize_content 再把合并后的整体归一化到 100%。
         comps, merge_notes = merge_components(block.components)
         warns.extend(merge_notes)
+        if block.is_merged:
+            by_cas: dict = {}
+            for c in block.components:
+                k = clean_cas(c.cas) or f'{c.substance or "未命名"}(G{c.row + 1})'
+                by_cas[k] = by_cas.get(k, 0.0) + max(c.mass, 0.0)
+            detail = '、'.join(f'{k} {v:.6g}' for k, v in by_cas.items())
+            self.log(f'{disp} 合并重量明细（H 列相加）：{detail}')
+            warns.append(
+                f'本表由源表 {block.excel_rows} 行合并而成（同一个 M 列合并格内'
+                f'D 列名称与 G 列 CAS 完全相同）：重量相加后重新归一化为 100%，'
+                f'{len(block.hsf_objs)} 份 HSF 报告合并成一份、报告编号写 '
+                f'{len(block.hsf_objs)} 个')
+        warns.extend(block.attr_notes)
         contents = normalize_content(comps, st.content_decimals)
         n_cleaned = 0
         for c, pct_v in zip(comps, contents):
