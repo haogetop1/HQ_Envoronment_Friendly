@@ -25,15 +25,15 @@ from __future__ import annotations
 
 import os
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill
 
 from .config import (DOMAIN_GROUPS, FALLBACK_REPORT_NO, MANDATORY_ITEMS,
                      RESULT_ITEMS, SECRET_CAS_VALUE, Settings)
 from .ole_extract import EmbeddedObject, extract_embedded_objects, is_pdf
-from .ocr import ocr_available
 from .pdf_parse import ReportInfo, merge_results, parse_pdf
 from .pdfout import save_pdf_group
 from .util import (clean_cas, extract_prefix, material_display, remove_spaces,
@@ -42,6 +42,8 @@ from .xls_source import (Component, MaterialBlock, SourceSheet, merge_components
                          normalize_content)
 from .xlsx_build import (ComponentRow, MaterialRecord, ReportRow, build_workbook,
                          _is_secret)
+from .template import validate_template
+from .formats import workbook_format
 
 RED_FILL = PatternFill('solid', fgColor='FFC7CE')
 BOLD = Font(bold=True)
@@ -61,11 +63,15 @@ def _material_name(sheet: SourceSheet, block: MaterialBlock, st: Settings) -> st
 
 def _dedup(names: list[str]) -> list[str]:
     """重名加 -1 / -2 后缀（首次出现不带后缀）。"""
-    seen: dict = {}
+    used = set()
     out = []
     for n in names:
-        seen[n] = seen.get(n, 0) + 1
-        out.append(n if seen[n] == 1 else f'{n}-{seen[n] - 1}')
+        candidate, suffix = n, 1
+        while safe_name(candidate).casefold() in used:
+            candidate = f'{n}-{suffix}'
+            suffix += 1
+        used.add(safe_name(candidate).casefold())
+        out.append(candidate)
     return out
 
 
@@ -140,6 +146,9 @@ class Pipeline:
         ③ 调用方回调。都没有则返回空串，由 run() 中止。
         2026-08-31 之前是硬编码兜底成 'RR12345'，换芯片时会静默套错编号，已去掉。
         """
+        if self.prefix_override:
+            self.log(f'使用指定编号：{self.prefix_override}')
+            return self.prefix_override
         got = extract_prefix(self.src_path)
         if got:
             self.log(f'芯片编号从源文件名自动识别：{got}')
@@ -147,10 +156,6 @@ class Pipeline:
 
         fname = os.path.basename(self.src_path)
         self.log(f'源文件名中未找到 RR 编号：{fname}', 'WARN')
-
-        if self.prefix_override:
-            self.log(f'使用指定编号：{self.prefix_override}')
-            return self.prefix_override
 
         if self.prefix_resolver:
             try:
@@ -169,6 +174,12 @@ class Pipeline:
     def run(self) -> RunResult:
         st = self.st
         try:
+            workbook_format(self.src_path)
+            validate_template(self.tpl_path)
+        except Exception as e:
+            self.res.errors.append(str(e))
+            return self.res
+        try:
             os.makedirs(self.out_dir, exist_ok=True)
         except Exception as e:
             self.res.errors.append(f'输出目录不可创建：{e}')
@@ -185,20 +196,12 @@ class Pipeline:
         self.log(f'输出目录：{self.out_dir}')
         self.log(f'芯片编号前缀：{prefix}')
 
-        # OCR 是可选依赖，精简版刻意不打进去。但缺了它，扫描件和「文本层解析
-        # 失败」的报告就会静默退化成 TBD00000000 / NA —— 用户只看到数据变少，
-        # 却不知道是 OCR 没装。静默降级比报错更危险，这里必须显式告警。
-        if not ocr_available():
-            self.log('当前程序未集成 OCR（精简版）：扫描件、以及常规解析失败的'
-                     '报告，其编号会填 TBD00000000、测试结果会填 NA，需人工补录。'
-                     '如需自动识别，请改用完整版', 'WARN')
-
         self.progress('读取源表并抽取内嵌 PDF', 5)
         try:
-            objs = extract_embedded_objects(self.src_path)
-        except Exception:
+            objs = extract_embedded_objects(self.src_path, st.sheet_name)
+        except Exception as e:
             self.log(traceback.format_exc(), 'ERROR')
-            self.res.errors.append('源 .xls 解析失败（可能不是 BIFF8 格式或文件损坏）')
+            self.res.errors.append(f'源表读取失败：{e}')
             return self.res
         pdfs = [o for o in objs if is_pdf(o)]
         self.log(f'共发现内嵌对象 {len(objs)} 个，其中 PDF {len(pdfs)} 个')
@@ -208,10 +211,16 @@ class Pipeline:
 
         try:
             sheet = SourceSheet(self.src_path, st)
+            if st.columns == Settings().columns:
+                st = self.st = sheet.st = replace(st, columns=sheet.detect_columns())
         except Exception:
             self.log(traceback.format_exc(), 'ERROR')
-            self.res.errors.append('源 .xls 工作表读取失败')
+            self.res.errors.append('源表工作表读取失败')
             return self.res
+
+        self.log('列位：' + '，'.join(f'{label}={get_column_letter(col+1)}' for label,col in (
+            ('材料名称',st.columns.material_model),('成分',st.columns.component),('CAS',st.columns.cas),
+            ('重量',st.columns.mass),('检测报告',st.columns.hsf),('MSDS',st.columns.msds))))
 
         # M 列合并格清单：既用于「同名同 CAS 合并」的前提判断，也用于给每个
         # 材料块取 MSDS。这里必须包含没有内嵌 MSDS 的格子——只要行落在同一个
@@ -236,7 +245,7 @@ class Pipeline:
         self.res.skipped = skipped
         n_cells = sum(len(b.merged_rows) or 1 for b in blocks) + len(skipped)
         n_merged = sum(1 for b in blocks if b.is_merged)
-        self.log(f'K 列合并格 {n_cells} 个：有效 {len(blocks)} 个'
+        self.log(f'检测报告区域 {n_cells} 个：有效 {len(blocks)} 个'
                  + (f'（其中 {n_merged} 个由多个格合并而成）' if n_merged else '')
                  + f'，空块 {len(skipped)} 个')
         for rs, re_, reason in skipped:
@@ -244,8 +253,8 @@ class Pipeline:
         for b in blocks:
             if not b.is_merged:
                 continue
-            self.log(f'同名同 CAS 合并：源表行 {b.excel_rows} 同属一个 M 列合并格，'
-                     f'D 列名称与 G 列 CAS 完全一致，已合并为一块——'
+            self.log(f'同名同 CAS 合并：源表行 {b.excel_rows} 同属一个 MSDS 合并格，'
+                     f'材料名称与 CAS 完全一致，已合并为一块。'
                      f'重量相加后重新归一化到 100%，{len(b.hsf_objs)} 份 HSF 报告'
                      f'合并成一份（报告编号照写 {len(b.hsf_objs)} 个）')
         self.log(f'将生成 {len(blocks)} 份表')
@@ -267,7 +276,7 @@ class Pipeline:
                      and rs <= o.row <= re_]
             if group:
                 msds_cells.append((rs, re_, group))
-        self.log(f'M 列合并格 {len(msds_cells)} 个含 MSDS，'
+        self.log(f'{len(msds_cells)} 个合并格内嵌 MSDS，'
                  f'将按 {len(blocks)} 个材料块各存一份')
 
         total = len(blocks) + 2
@@ -276,16 +285,20 @@ class Pipeline:
             self.progress(f'处理 {i + 1}/{len(blocks)}：{disp}', pct)
             try:
                 rec = self._one(sheet, block, disp, prefix, i, msds_cells)
-            except Exception:
+            except Exception as e:
                 self.log(traceback.format_exc(), 'ERROR')
+                self.res.errors.append(f'{disp} 生成失败：{e}')
                 rec = MaterialRecord(index=i, name=disp, display=disp,
                                      excel_rows=block.excel_rows)
                 rec.warnings.append('处理异常，输出表可能不完整')
             self.res.records.append(rec)
 
         self.progress('写日志与汇总报告', 96)
-        self._write_log()
-        self._write_summary(prefix)
+        try:
+            self._write_log()
+            self._write_summary(prefix)
+        except Exception as e:
+            self.res.errors.append(f'日志或汇总写入失败：{e}')
         return self.res
 
     # ---------------- 单个物料
@@ -304,16 +317,20 @@ class Pipeline:
         # normalize_content 再把合并后的整体归一化到 100%。
         comps, merge_notes = merge_components(block.components)
         warns.extend(merge_notes)
+        if sum(max(c.mass,0) for c in comps)<=0:
+            warns.append('源表重量全部缺失或为零，沿用原规则平均分配含量，必须人工复核')
+        elif any(c.mass<=0 for c in block.components):
+            warns.append('部分成分重量缺失、为零或负数，沿用原规则按零参与归一化，请复核')
         if block.is_merged:
             by_cas: dict = {}
             for c in block.components:
                 k = clean_cas(c.cas) or f'{c.substance or "未命名"}(G{c.row + 1})'
                 by_cas[k] = by_cas.get(k, 0.0) + max(c.mass, 0.0)
             detail = '、'.join(f'{k} {v:.6g}' for k, v in by_cas.items())
-            self.log(f'{disp} 合并重量明细（H 列相加）：{detail}')
+            self.log(f'{disp} 合并重量明细：{detail}')
             warns.append(
-                f'本表由源表 {block.excel_rows} 行合并而成（同一个 M 列合并格内'
-                f'D 列名称与 G 列 CAS 完全相同）：重量相加后重新归一化为 100%，'
+                f'本表由源表 {block.excel_rows} 行合并而成（同一个 MSDS 合并格内'
+                f'材料名称与 CAS 完全相同）：重量相加后重新归一化为 100%，'
                 f'{len(block.hsf_objs)} 份 HSF 报告合并成一份、报告编号写 '
                 f'{len(block.hsf_objs)} 个')
         warns.extend(block.attr_notes)
@@ -361,6 +378,8 @@ class Pipeline:
                          f'{type(e).__name__}: {e}', 'ERROR')
                 continue
             infos.append(info)
+            if not info.ok:
+                self.res.errors.append(f'{disp}：{o.file_name} 无法读取，结果不完整')
             if info.warnings:
                 warns.append(f'{o.file_name}：' + '；'.join(info.warnings))
 
@@ -402,7 +421,7 @@ class Pipeline:
             warns.append(f'{n_date_missing} 份报告未识别到日期，且同单元格无可用'
                          f'日期可借用，日期栏留空待人工补')
         if not block.hsf_objs:
-            warns.append('#该 K 列单元格内没有内嵌 HSF 报告，报告区留空待补')
+            warns.append('该材料没有内嵌 HSF 报告，报告区留空待补')
 
         # 输出 xlsx
         fname = safe_name(f'{prefix}-{disp}', default=f'{prefix}-{idx}') + '.xlsx'
@@ -417,6 +436,8 @@ class Pipeline:
         warns.extend(w)
         if path:
             self.res.n_hsf += 1
+        else:
+            self.res.errors.append(f'{disp}：HSF PDF 未能生成')
 
         # MSDS：跟随 K 块，与输出的 HSF PDF 一一对应（2026-08-31 v1.3）
         group = next((g for (rs, re_, g) in msds_cells
@@ -424,14 +445,17 @@ class Pipeline:
         if group:
             mpath, mw = save_pdf_group(self.out_dir, prefix, 'MSDS', disp,
                                        group, self._used_pdf_paths)
-            self.res.n_msds += 1
+            if mpath:
+                self.res.n_msds += 1
+            else:
+                self.res.errors.append(f'{disp}：MSDS PDF 未能生成')
             rec.msds_out = mpath
             for x in mw:
                 self.log(x, 'WARN')
             src = '、'.join(o.file_name for o in group)
-            warns.append(f'MSDS 取自所属 M 列合并格（{src}），按本材料名另存')
+            self.log(f'{disp}：MSDS 取自所属合并格（{src}）')
         else:
-            warns.append('所属 M 列合并格内没有 MSDS，未生成 MSDS PDF')
+            warns.append('所属合并格内没有 MSDS，未生成 MSDS PDF')
 
         self.log(f'{disp}（行 {block.excel_rows}）：成分 {len(rec.components)} 条，'
                  f'HSF {len(block.hsf_objs)} 份，测试项 {len(merged)} 项'
@@ -489,7 +513,7 @@ class Pipeline:
             for rs, re_, reason in self.res.skipped:
                 ws3.append([f'{rs + 1}-{re_ + 1}', reason])
         else:
-            ws3.append(['（无）', '本次运行没有空块，所有 K 列合并格都出了表'])
+            ws3.append(['（无）', '所有检测报告区域均已处理'])
 
         for sheet in (ws, ws2, ws3):
             for col in sheet.columns:

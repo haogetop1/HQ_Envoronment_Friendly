@@ -72,7 +72,16 @@ def save_pdf_group(out_dir: str, prefix: str, kind: str, name: str,
         path = os.path.join(out_dir, f'{base}-{i}.pdf')
         i += 1
     used.add(path)
-    data = merge_pdfs([o.data for o in objs])
+    try:
+        for obj in objs:
+            reader = PdfReader(io.BytesIO(obj.data))
+            if not len(reader.pages):
+                raise ValueError('PDF 没有页面')
+            for page in reader.pages:
+                page.get_contents()
+        data = merge_pdfs([o.data for o in objs])
+    except Exception as e:
+        return '', [f'{base}.pdf 无法生成：{e}']
     if not data:
         warns.append(f'{base}.pdf 合并失败')
         return '', warns

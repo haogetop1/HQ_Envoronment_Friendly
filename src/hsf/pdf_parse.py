@@ -25,7 +25,6 @@ import re
 from dataclasses import dataclass, field
 
 from .config import AGENCY_RULES, ITEM_LABELS
-from .ocr import ocr_available, ocr_pdf_lines
 from .util import fmt_date, parse_date, read_pdf_text
 
 # ------------------------------------------------------------ 词法
@@ -429,34 +428,8 @@ def parse_pdf(data: bytes, source: str = '', file_name_hint: str = '') -> Report
     info.agency = _find_agency(txt.layout_lines, txt.plain_lines,
                                file_name=file_name_hint or source)
 
-    # 扫描件兜底（2026-08-31）：图片型 PDF 抽不出文本，改用 OCR。
-    # 只在「编号或结果没抓到」时启用——OCR 每页约 6 秒，不能对正常 PDF 乱用。
-    if (not info.report_no or not results):
-        if ocr_available():
-            ocr_lines = ocr_pdf_lines(data)
-            if ocr_lines:
-                ocr_res: dict = {}
-                _parse_layout_tokens(ocr_lines, ocr_res)
-                _parse_layout_slice(ocr_lines, ocr_res)
-                _parse_plain(ocr_lines, ocr_res)
-                for k, v in ocr_res.items():
-                    results.setdefault(k, v)      # 已有的结果不被 OCR 覆盖
-                info.results = results
-                if not info.report_no:
-                    info.report_no = _find_report_no(ocr_lines, ocr_lines)
-                if not info.report_date:
-                    info.report_date = _find_date(ocr_lines, ocr_lines)
-                if not info.agency:
-                    info.agency = _find_agency(ocr_lines, ocr_lines,
-                                               file_name=file_name_hint or source)
-                info.warnings.append(
-                    f'文本层抽取不到内容，已改用 OCR 识别（{len(ocr_lines)} 行）')
-        else:
-            # 精简版：该 OCR 却没 OCR。不留痕的话，用户只看到结果变少，
-            # 无从判断是「报告本就没测」还是「工具没识别出」。
-            info.warnings.append(
-                f'{source}：本需 OCR 才能识别，但当前程序未集成 OCR（精简版），'
-                '编号将填 TBD00000000、未测项填 NA，需人工补录')
+    if not (txt.plain.strip() or txt.layout.strip()):
+        info.warnings.append('PDF 没有可提取的文字，请人工复核报告字段和测试结果')
 
     if not info.report_no:
         info.warnings.append('未识别到报告编号')

@@ -24,6 +24,9 @@ _sample*/
 build/
 dist/
 *.exe
+*.app/
+*.dmg
+*.zip
 processing_log.txt
 _汇总报告.xlsx
 

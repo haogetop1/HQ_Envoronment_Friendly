@@ -77,9 +77,9 @@ def extract_prefix(source_path: str) -> str | None:
     抓不到时返回 None（2026-08-31：不再硬编码兜底，由调用方弹窗问用户）。
     """
     name = source_path.rsplit('\\', 1)[-1].rsplit('/', 1)[-1]
-    m = re.search(r'\b(RR\s*-?\s*\d{3,8})\b', name, re.I)
+    m = re.search(r'(?<![A-Z0-9])RR\s*-?\s*(\d{3,8})(-[0-9][A-Z0-9]*)?(?![A-Z0-9])', name, re.I)
     if m:
-        return re.sub(r'[\s-]', '', m.group(1)).upper()
+        return ('RR' + m.group(1) + (m.group(2) or '')).upper()
     m = re.search(r'([A-Z]{1,4}-?\d{4,8})', name)
     if m:
         return m.group(1).upper()

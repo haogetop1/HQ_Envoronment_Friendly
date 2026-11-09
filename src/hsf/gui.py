@@ -15,16 +15,22 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .config import Settings
 from .pipeline import Pipeline
 from .util import extract_prefix
+from .formats import workbook_format
+from .template import validate_template
 
-TITLE = 'HSF 均质表自动填写工具'
-GEOMETRY = '760x620'
+TITLE = 'HSF 均质表助手 · Mac'
+GEOMETRY = '900x740'
 
-FILE_TYPES_XLS = [('Excel 97-2003 源表', '*.xls'), ('所有文件', '*.*')]
+FILE_TYPES_XLS = [('Excel 材料成分表', ('*.xls', '*.xlsx')), ('所有文件', '*.*')]
 FILE_TYPES_XLSX = [('Excel 模板', '*.xlsx'), ('所有文件', '*.*')]
 
 
@@ -38,12 +44,18 @@ class App:
         self.src_var = tk.StringVar()
         self.tpl_var = tk.StringVar()
         self.out_var = tk.StringVar()
+        self.prefix_var = tk.StringVar()
         self.status_var = tk.StringVar(value='就绪：先选择源表与模板')
         self.running = False
         self._prefix = None          # 由 start() 预检时确定
         self._q: queue.Queue = queue.Queue()
 
         self._build()
+        base = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[2]))
+        template = base/'assets'/'均质创建导入模板.xlsx'
+        if template.exists():
+            self.tpl_var.set(str(template))
+        self.root.protocol('WM_DELETE_WINDOW', self.close)
         self._init_dnd()
         self.root.after(80, self._pump)
 
@@ -55,8 +67,8 @@ class App:
         top = ttk.Frame(root)
         top.pack(fill='x', **pad)
 
-        ttk.Label(top, text='Step 1 · 源材料成分表 (.xls，内含检测报告 PDF)',
-                  font=('Microsoft YaHei UI', 9, 'bold')).pack(anchor='w')
+        ttk.Label(top, text='1  选择材料成分表（.xls / .xlsx，含内嵌 PDF）',
+                  font=('PingFang SC', 13, 'bold')).pack(anchor='w')
         f1 = ttk.Frame(top)
         f1.pack(fill='x', pady=(2, 0))
         self.src_entry = ttk.Entry(f1, textvariable=self.src_var)
@@ -64,8 +76,8 @@ class App:
         ttk.Button(f1, text='选择…', width=10,
                    command=self.pick_src).pack(side='left', padx=(6, 0))
 
-        ttk.Label(top, text='Step 2 · 均质创建导入模板 (.xlsx)',
-                  font=('Microsoft YaHei UI', 9, 'bold')).pack(anchor='w', pady=(10, 0))
+        ttk.Label(top, text='2  选择均质创建导入模板（.xlsx）',
+                  font=('PingFang SC', 13, 'bold')).pack(anchor='w', pady=(10, 0))
         f2 = ttk.Frame(top)
         f2.pack(fill='x', pady=(2, 0))
         self.tpl_entry = ttk.Entry(f2, textvariable=self.tpl_var)
@@ -73,14 +85,20 @@ class App:
         ttk.Button(f2, text='选择…', width=10,
                    command=self.pick_tpl).pack(side='left', padx=(6, 0))
 
-        ttk.Label(top, text='Step 3 · 输出目录（全平铺，每次运行都需指定）',
-                  font=('Microsoft YaHei UI', 9, 'bold')).pack(anchor='w', pady=(10, 0))
+        ttk.Label(top, text='3  保存位置（每次生成独立子文件夹）',
+                  font=('PingFang SC', 13, 'bold')).pack(anchor='w', pady=(10, 0))
         f3 = ttk.Frame(top)
         f3.pack(fill='x', pady=(2, 0))
         self.out_entry = ttk.Entry(f3, textvariable=self.out_var)
         self.out_entry.pack(side='left', fill='x', expand=True)
         ttk.Button(f3, text='选择…', width=10,
                    command=self.pick_out).pack(side='left', padx=(6, 0))
+        f4=ttk.Frame(top); f4.pack(fill='x',pady=(12,4))
+        ttk.Label(f4,text='芯片编号').pack(side='left')
+        ttk.Entry(f4,textvariable=self.prefix_var,width=24).pack(side='left',padx=8)
+        ttk.Label(f4,text='自动识别后可修改，例如 RR10000-01').pack(side='left')
+        ttk.Label(top,text='本机离线处理 · 默认 SAC / Metal / TBD / 黑色 / Ⅰ级；自动补 ND 的结果需复核',
+                  wraplength=820).pack(anchor='w',pady=(8,0))
 
         bar = ttk.Frame(root)
         bar.pack(fill='x', padx=10, pady=(12, 2))
@@ -101,14 +119,14 @@ class App:
         nb = ttk.Notebook(root)
         nb.pack(fill='both', expand=True, padx=10, pady=(8, 10))
 
-        self.log_box = tk.Text(nb, height=8, wrap='none', font=('Consolas', 9))
+        self.log_box = tk.Text(nb, height=8, wrap='word', font=('Menlo', 11))
         sb = ttk.Scrollbar(self.log_box, command=self.log_box.yview)
         self.log_box.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y')
         self.log_box.pack(fill='both', expand=True)
         nb.add(self.log_box, text='运行日志')
 
-        self.err_box = tk.Text(nb, height=8, wrap='none', font=('Consolas', 9))
+        self.err_box = tk.Text(nb, height=8, wrap='word', font=('Menlo', 11))
         sb2 = ttk.Scrollbar(self.err_box, command=self.err_box.yview)
         self.err_box.configure(yscrollcommand=sb2.set)
         sb2.pack(side='right', fill='y')
@@ -153,6 +171,7 @@ class App:
             return
         if kind == 'src':
             self.src_var.set(path)
+            self.prefix_var.set(extract_prefix(path) or '')
         elif kind == 'tpl':
             self.tpl_var.set(path)
         else:
@@ -165,10 +184,12 @@ class App:
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
-        if ext == '.xls':
-            self.src_var.set(path)
-        elif ext == '.xlsx':
-            self.tpl_var.set(path)
+        if ext in ('.xls','.xlsx'):
+            if '模板' in os.path.basename(path):
+                self.tpl_var.set(path)
+            else:
+                self.src_var.set(path)
+                self.prefix_var.set(extract_prefix(path) or '')
         elif os.path.isdir(path):
             self.out_var.set(path)
         else:
@@ -184,10 +205,11 @@ class App:
 
     # ------------------------------------------------------------ 选择
     def pick_src(self):
-        p = filedialog.askopenfilename(title='选择材料成分表 (.xls)',
+        p = filedialog.askopenfilename(title='选择材料成分表 (.xls / .xlsx)',
                                        filetypes=FILE_TYPES_XLS)
         if p:
             self.src_var.set(p)
+            self.prefix_var.set(extract_prefix(p) or '')
             self._hint_out_dir()
 
     def pick_tpl(self):
@@ -202,10 +224,10 @@ class App:
             self.out_var.set(p)
 
     def open_out(self):
-        d = self.out_var.get()
+        d = getattr(self,'_last_out',self.out_var.get())
         if d and os.path.isdir(d):
             try:
-                os.startfile(d)  # noqa: S606 - Windows only convenience
+                subprocess.Popen(['open',d] if sys.platform=='darwin' else ['xdg-open',d])
             except Exception:
                 messagebox.showinfo('输出目录', d)
 
@@ -247,15 +269,20 @@ class App:
     def _validate(self) -> str | None:
         src, tpl, out = self.src_var.get(), self.tpl_var.get(), self.out_var.get()
         if not src or not os.path.isfile(src):
-            return '请选择有效的源材料成分表 (.xls)'
+            return '请选择有效的源材料成分表 (.xls / .xlsx)'
         if os.path.splitext(src)[1].lower() not in ('.xls', '.xlsx'):
-            return '源表必须是 .xls（Excel 97-2003，含内嵌 PDF）'
+            return '源表必须是 .xls 或 .xlsx（含内嵌 PDF）'
         if not tpl or not os.path.isfile(tpl):
             return '请选择有效的均质创建导入模板 (.xlsx)'
         if os.path.splitext(tpl)[1].lower() != '.xlsx':
             return '模板必须是 .xlsx 文件'
         if not out:
             return '请选择输出目录'
+        try:
+            workbook_format(src)
+            validate_template(tpl)
+        except Exception as e:
+            return str(e)
         return None
 
     def _ask_prefix(self, src: str) -> str | None:
@@ -286,7 +313,7 @@ class App:
             return
 
         # 芯片编号预检：抓不到就先问清楚再开工（2026-08-31）
-        prefix = extract_prefix(self.src_var.get())
+        prefix = self.prefix_var.get().strip() or extract_prefix(self.src_var.get())
         if not prefix:
             prefix = self._ask_prefix(self.src_var.get())
             if not prefix:
@@ -296,6 +323,9 @@ class App:
                               '「材料成分表 RR12345.xls」。')
                 return
         self._prefix = prefix
+        run_dir = os.path.join(self.out_var.get(), 'HSF-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+        self._last_out = run_dir
+        self._inputs = (self.src_var.get(), self.tpl_var.get(), run_dir)
 
         self.running = True
         self.run_btn.configure(state='disabled', text='正在生成…')
@@ -315,7 +345,7 @@ class App:
         t0 = time.time()
         try:
             pipe = Pipeline(
-                self.src_var.get(), self.tpl_var.get(), self.out_var.get(),
+                *self._inputs,
                 Settings(),
                 progress=lambda msg, pct: self._q.put(('prog', msg, pct)),
                 logger=lambda line, level: self._q.put(('log', line, level)),
@@ -372,7 +402,7 @@ class App:
                 self.log(f'WARN  [{rec.name}] {w}', 'WARN')
 
         if res.errors:
-            self.status_var.set(f'完成但有 {len(res.errors)} 个致命错误，'
+            self.status_var.set(f'生成未完成：{len(res.errors)} 个错误，'
                                 f'耗时 {elapsed:.1f}s')
             self.log(f'完成（含 {len(res.errors)} 个致命错误），耗时 {elapsed:.1f}s',
                      'ERROR')
@@ -389,6 +419,11 @@ class App:
             self.log(f'输出目录：{res.out_dir}', 'OK')
 
         self._finish_err_tab(len(res.errors) + n_warn)
+
+    def close(self):
+        if self.running and not messagebox.askyesno('正在生成', '关闭将中断生成，输出可能不完整。仍要退出吗？'):
+            return
+        self.root.destroy()
 
     def _finish_err_tab(self, n=None):
         try:

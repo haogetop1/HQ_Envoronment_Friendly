@@ -31,6 +31,7 @@ from openpyxl.styles import PatternFill
 from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 
 from .config import RESULT_ITEMS, SECRET_CAS, SECRET_CAS_VALUE, Settings
+from .template import expand_validations, restore_extensions
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -130,6 +131,7 @@ def build_workbook(template_path: str, out_path: str, rec: MaterialRecord,
 
     # --- 先给成分行腾位置（在第 12 行守护行之前插）
     if k_comp:
+        expand_validations(ws, st.tpl_comp_first, st.tpl_comp_marker, k_comp)
         ws.insert_rows(st.tpl_comp_marker, k_comp)
         _shift_merges(ws, st.tpl_comp_marker, k_comp)
         for r in range(st.tpl_comp_marker, st.tpl_comp_marker + k_comp):
@@ -137,6 +139,7 @@ def build_workbook(template_path: str, out_path: str, rec: MaterialRecord,
 
     guard_rep = st.tpl_report_marker + k_comp
     if k_rep:
+        expand_validations(ws, st.tpl_report_first + k_comp, guard_rep, k_rep)
         ws.insert_rows(guard_rep, k_rep)
         _shift_merges(ws, guard_rep, k_rep)
         for r in range(guard_rep, guard_rep + k_rep):
@@ -188,7 +191,7 @@ def build_workbook(template_path: str, out_path: str, rec: MaterialRecord,
         ws.cell(row=r, column=1, value=i + 1)
         ws.cell(row=r, column=2, value=rp.agency)
         cell_no = ws.cell(row=r, column=3, value=rp.report_no)
-        if not rp.report_no:
+        if not rp.report_no or rp.report_no == 'TBD00000000':
             cell_no.fill = RED_FILL
             warns.append(f'第 {i + 1} 条报告缺失报告编号')
         dt = _to_dt(rp.report_date)
@@ -205,6 +208,7 @@ def build_workbook(template_path: str, out_path: str, rec: MaterialRecord,
             wb[name].sheet_state = 'hidden'
 
     wb.save(out_path)
+    restore_extensions(template_path, out_path, k_comp, k_rep)
     return warns
 
 

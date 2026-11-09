@@ -2,11 +2,27 @@
 """读取源 .xls：合并单元格、物料块划分、成分提取。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import re
 
 import xlrd
+import io
+import openpyxl
+from .formats import workbook_format
 
-from .config import Settings
+
+class XlsxSheet:
+    def __init__(self, sheet):
+        self._sheet = sheet
+        self.nrows, self.ncols = sheet.max_row, sheet.max_column
+        self.merged_cells = [(r.min_row-1,r.max_row,r.min_col-1,r.max_col)
+                             for r in sheet.merged_cells.ranges]
+
+    def cell_value(self, row, col):
+        value = self._sheet.cell(row+1,col+1).value
+        return '' if value is None else value
+
+from .config import Columns, Settings
 from .ole_extract import EmbeddedObject, is_pdf
 from .util import clean_cas, material_display, remove_spaces
 
@@ -54,11 +70,17 @@ class SourceSheet:
     def __init__(self, path: str, settings: Settings):
         self.path = path
         self.st = settings
-        self.book = xlrd.open_workbook(path, formatting_info=True)
-        try:
-            self.sheet = self.book.sheet_by_name(settings.sheet_name)
-        except xlrd.XLRDError:
-            self.sheet = self.book.sheet_by_index(0)
+        if workbook_format(path) == 'xlsx':
+            with open(path,'rb') as f:
+                self.book = openpyxl.load_workbook(io.BytesIO(f.read()),data_only=True)
+            ws = self.book[settings.sheet_name] if settings.sheet_name in self.book.sheetnames else self.book.worksheets[0]
+            self.sheet = XlsxSheet(ws)
+        else:
+            self.book = xlrd.open_workbook(path, formatting_info=True)
+            try:
+                self.sheet = self.book.sheet_by_name(settings.sheet_name)
+            except xlrd.XLRDError:
+                self.sheet = self.book.sheet_by_index(0)
         self.nrows = self.sheet.nrows
         self.ncols = self.sheet.ncols
         # (row, col) -> (anchor_row, anchor_col)
@@ -91,6 +113,26 @@ class SourceSheet:
             return float(str(v).strip())
         except Exception:
             return 0.0
+
+    def detect_columns(self) -> Columns:
+        """Resolve the complete material layout by header, or retain the configured defaults."""
+        headers = [re.sub(r'\s+', '', self.text(self.st.header_row, col)).casefold()
+                   for col in range(self.ncols)]
+        patterns = {
+            'material_model': r'材料名称[/／]型号|材料型号',
+            'component': r'材料成[分份]|物质名称',
+            'cas': r'cas(?:编号|号码|number|no\.?)?',
+            'mass': r'材料成[分份]重量(?:[（(].*[）)])?',
+            'hsf': r'(?:hsf|sgs|rohs)?检测报告(?:[（(].*[）)])?',
+            'msds': r'msds(?:[（(].*[）)])?',
+        }
+        detected = {}
+        for field, pattern in patterns.items():
+            matches = [i for i, header in enumerate(headers) if re.fullmatch(pattern, header)]
+            if len(matches) != 1:
+                return self.st.columns
+            detected[field] = matches[0]
+        return replace(self.st.columns, **detected)
 
     # ---------------- 数据区
     def detect_data_range(self):
@@ -181,7 +223,7 @@ class SourceSheet:
                     continue
                 comps.append(Component(r, sub, cas, self.number(r, st.columns.mass)))
             if not comps:
-                skipped.append((rs, re_, 'K 列单元格内没有成分行'))
+                skipped.append((rs, re_, '检测报告对应区域内没有成分行'))
                 continue
             b = MaterialBlock(len(blocks), rs, re_, name_raw, '', '', comps)
             b.name = self.material_name(b)
@@ -197,7 +239,7 @@ class SourceSheet:
         for b in blocks:
             if not b.hsf_objs:
                 skipped.append((b.row_start, b.row_end,
-                                'K 列单元格内没有内嵌 HSF 报告'))
+                                '检测报告对应区域内没有内嵌 HSF 报告'))
                 continue
             kept.append(b)
 
@@ -233,18 +275,13 @@ class SourceSheet:
             return f'{b.row_start + 1} 行（{nm}）' if nm else f'{b.row_start + 1} 行'
 
         for o in objs:
-            if not is_pdf(o):
+            if not is_pdf(o) or o.col != st.columns.hsf:
                 continue
             anchor_row = o.bottom_row if bottom else o.row
             target = owner(anchor_row)
             if target is None:
                 continue
-            if o.col == st.columns.hsf:
-                target.hsf_objs.append(o)
-            elif o.col == st.columns.msds:
-                target.msds_objs.append(o)
-            else:
-                continue
+            target.hsf_objs.append(o)
 
             top = owner(o.row)
             if top is None or top is target:
