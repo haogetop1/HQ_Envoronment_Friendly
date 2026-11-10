@@ -27,6 +27,25 @@ from .ole_extract import EmbeddedObject, is_pdf
 from .util import clean_cas, material_display, remove_spaces
 
 
+def columns_for_headers(values, defaults: Columns) -> Columns | None:
+    headers = [re.sub(r'\s+', '', str(value or '')).casefold() for value in values]
+    patterns = {
+        'material_model': r'材料名称[/／]型号|材料型号',
+        'component': r'材料成[分份]|物质名称',
+        'cas': r'cas(?:编号|号码|number|no\.?)?',
+        'mass': r'材料成[分份]重量(?:[（(].*[）)])?',
+        'hsf': r'(?:hsf|sgs|rohs)?检测报告(?:[（(].*[）)])?',
+        'msds': r'msds(?:[（(].*[）)])?',
+    }
+    detected = {}
+    for field, pattern in patterns.items():
+        matches = [i for i, header in enumerate(headers) if re.fullmatch(pattern, header)]
+        if len(matches) != 1:
+            return None
+        detected[field] = matches[0]
+    return replace(defaults, **detected)
+
+
 @dataclass
 class Component:
     row: int
@@ -70,7 +89,12 @@ class SourceSheet:
     def __init__(self, path: str, settings: Settings):
         self.path = path
         self.st = settings
-        if workbook_format(path) == 'xlsx':
+        source_format = workbook_format(path)
+        if source_format == 'numbers':
+            from .numbers_source import NumbersSheet
+            self.sheet = NumbersSheet(path, settings)
+            self.st = self.sheet.settings
+        elif source_format == 'xlsx':
             with open(path,'rb') as f:
                 self.book = openpyxl.load_workbook(io.BytesIO(f.read()),data_only=True)
             ws = self.book[settings.sheet_name] if settings.sheet_name in self.book.sheetnames else self.book.worksheets[0]
@@ -116,23 +140,8 @@ class SourceSheet:
 
     def detect_columns(self) -> Columns:
         """Resolve the complete material layout by header, or retain the configured defaults."""
-        headers = [re.sub(r'\s+', '', self.text(self.st.header_row, col)).casefold()
-                   for col in range(self.ncols)]
-        patterns = {
-            'material_model': r'材料名称[/／]型号|材料型号',
-            'component': r'材料成[分份]|物质名称',
-            'cas': r'cas(?:编号|号码|number|no\.?)?',
-            'mass': r'材料成[分份]重量(?:[（(].*[）)])?',
-            'hsf': r'(?:hsf|sgs|rohs)?检测报告(?:[（(].*[）)])?',
-            'msds': r'msds(?:[（(].*[）)])?',
-        }
-        detected = {}
-        for field, pattern in patterns.items():
-            matches = [i for i, header in enumerate(headers) if re.fullmatch(pattern, header)]
-            if len(matches) != 1:
-                return self.st.columns
-            detected[field] = matches[0]
-        return replace(self.st.columns, **detected)
+        values = [self.text(self.st.header_row, col) for col in range(self.ncols)]
+        return columns_for_headers(values, self.st.columns) or self.st.columns
 
     # ---------------- 数据区
     def detect_data_range(self):

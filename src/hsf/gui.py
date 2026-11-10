@@ -30,7 +30,8 @@ from .template import validate_template
 TITLE = 'HSF 均质表助手 · Mac'
 GEOMETRY = '900x740'
 
-FILE_TYPES_XLS = [('Excel 材料成分表', ('*.xls', '*.xlsx')), ('所有文件', '*.*')]
+SOURCE_EXTENSIONS = ('.xls', '.xlsx', '.numbers', '.number')
+FILE_TYPES_XLS = [('Excel / Numbers 材料成分表', tuple('*' + ext for ext in SOURCE_EXTENSIONS)), ('所有文件', '*.*')]
 FILE_TYPES_XLSX = [('Excel 模板', '*.xlsx'), ('所有文件', '*.*')]
 
 
@@ -44,6 +45,7 @@ class App:
         self.src_var = tk.StringVar()
         self.tpl_var = tk.StringVar()
         self.out_var = tk.StringVar()
+        self.pdf_dir_var = tk.StringVar()
         self.prefix_var = tk.StringVar()
         self.status_var = tk.StringVar(value='就绪：先选择源表与模板')
         self.running = False
@@ -67,7 +69,7 @@ class App:
         top = ttk.Frame(root)
         top.pack(fill='x', **pad)
 
-        ttk.Label(top, text='1  选择材料成分表（.xls / .xlsx，含内嵌 PDF）',
+        ttk.Label(top, text='1  选择材料成分表（Excel 或 Numbers）',
                   font=('PingFang SC', 13, 'bold')).pack(anchor='w')
         f1 = ttk.Frame(top)
         f1.pack(fill='x', pady=(2, 0))
@@ -75,6 +77,12 @@ class App:
         self.src_entry.pack(side='left', fill='x', expand=True)
         ttk.Button(f1, text='选择…', width=10,
                    command=self.pick_src).pack(side='left', padx=(6, 0))
+
+        ttk.Label(top, text='Numbers 原始报告文件夹（可选，留空时生成缺件清单）').pack(anchor='w', pady=(8, 0))
+        reports = ttk.Frame(top)
+        reports.pack(fill='x', pady=(2, 0))
+        ttk.Entry(reports, textvariable=self.pdf_dir_var).pack(side='left', fill='x', expand=True)
+        ttk.Button(reports, text='选择…', width=10, command=self.pick_pdf_dir).pack(side='left', padx=(6, 0))
 
         ttk.Label(top, text='2  选择均质创建导入模板（.xlsx）',
                   font=('PingFang SC', 13, 'bold')).pack(anchor='w', pady=(10, 0))
@@ -184,8 +192,8 @@ class App:
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
-        if ext in ('.xls','.xlsx'):
-            if '模板' in os.path.basename(path):
+        if ext in SOURCE_EXTENSIONS:
+            if ext == '.xlsx' and '模板' in os.path.basename(path):
                 self.tpl_var.set(path)
             else:
                 self.src_var.set(path)
@@ -205,7 +213,7 @@ class App:
 
     # ------------------------------------------------------------ 选择
     def pick_src(self):
-        p = filedialog.askopenfilename(title='选择材料成分表 (.xls / .xlsx)',
+        p = filedialog.askopenfilename(title='选择 Excel 或 Numbers 材料成分表',
                                        filetypes=FILE_TYPES_XLS)
         if p:
             self.src_var.set(p)
@@ -222,6 +230,11 @@ class App:
         p = filedialog.askdirectory(title='选择输出目录')
         if p:
             self.out_var.set(p)
+
+    def pick_pdf_dir(self):
+        path = filedialog.askdirectory(title='选择 Numbers 原始报告文件夹')
+        if path:
+            self.pdf_dir_var.set(path)
 
     def open_out(self):
         d = getattr(self,'_last_out',self.out_var.get())
@@ -268,10 +281,10 @@ class App:
     # ------------------------------------------------------------ 执行
     def _validate(self) -> str | None:
         src, tpl, out = self.src_var.get(), self.tpl_var.get(), self.out_var.get()
-        if not src or not os.path.isfile(src):
-            return '请选择有效的源材料成分表 (.xls / .xlsx)'
-        if os.path.splitext(src)[1].lower() not in ('.xls', '.xlsx'):
-            return '源表必须是 .xls 或 .xlsx（含内嵌 PDF）'
+        if not src or not os.path.exists(src):
+            return '请选择有效的 Excel 或 Numbers 材料成分表'
+        if os.path.splitext(src)[1].lower() not in SOURCE_EXTENSIONS:
+            return '源表必须是 .xls、.xlsx、.numbers 或 .number'
         if not tpl or not os.path.isfile(tpl):
             return '请选择有效的均质创建导入模板 (.xlsx)'
         if os.path.splitext(tpl)[1].lower() != '.xlsx':
@@ -279,7 +292,10 @@ class App:
         if not out:
             return '请选择输出目录'
         try:
-            workbook_format(src)
+            source_format = workbook_format(src)
+            pdf_dir = self.pdf_dir_var.get().strip()
+            if source_format == 'numbers' and pdf_dir and not os.path.isdir(pdf_dir):
+                return '原始报告文件夹不存在'
             validate_template(tpl)
         except Exception as e:
             return str(e)
@@ -326,6 +342,7 @@ class App:
         run_dir = os.path.join(self.out_var.get(), 'HSF-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
         self._last_out = run_dir
         self._inputs = (self.src_var.get(), self.tpl_var.get(), run_dir)
+        self._pdf_dir = self.pdf_dir_var.get().strip() or None
 
         self.running = True
         self.run_btn.configure(state='disabled', text='正在生成…')
@@ -349,7 +366,7 @@ class App:
                 Settings(),
                 progress=lambda msg, pct: self._q.put(('prog', msg, pct)),
                 logger=lambda line, level: self._q.put(('log', line, level)),
-                prefix_override=self._prefix)
+                prefix_override=self._prefix, pdf_dir=self._pdf_dir)
             res = pipe.run()
             self._q.put(('done', res, time.time() - t0))
         except Exception:

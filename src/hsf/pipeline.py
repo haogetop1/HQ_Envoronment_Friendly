@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import traceback
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -111,10 +112,11 @@ class RunResult:
 class Pipeline:
     def __init__(self, src_path: str, tpl_path: str, out_dir: str,
                  settings: Settings | None = None, progress=None, logger=None,
-                 prefix_resolver=None, prefix_override: str | None = None):
+                 prefix_resolver=None, prefix_override: str | None = None, pdf_dir: str | None = None):
         self.src_path = src_path
         self.tpl_path = tpl_path
         self.out_dir = out_dir
+        self.pdf_dir = pdf_dir
         self.st = settings or Settings()
         self.progress = progress or (lambda msg, pct: None)
         self.logger = logger or (lambda line, level: None)
@@ -174,7 +176,7 @@ class Pipeline:
     def run(self) -> RunResult:
         st = self.st
         try:
-            workbook_format(self.src_path)
+            source_format = workbook_format(self.src_path)
             validate_template(self.tpl_path)
         except Exception as e:
             self.res.errors.append(str(e))
@@ -196,26 +198,41 @@ class Pipeline:
         self.log(f'输出目录：{self.out_dir}')
         self.log(f'芯片编号前缀：{prefix}')
 
-        self.progress('读取源表并抽取内嵌 PDF', 5)
+        self.progress('读取材料成分表和报告', 5)
         try:
-            objs = extract_embedded_objects(self.src_path, st.sheet_name)
+            sheet = SourceSheet(self.src_path, st)
+            if source_format == 'numbers':
+                from .numbers_source import write_audit
+                st = self.st = sheet.st
+                attachments = sheet.sheet.attachments(sheet, self.pdf_dir)
+                write_audit(Path(self.out_dir) / 'Numbers附件核对.xlsx', sheet, attachments)
+                objs = [item.object for item in attachments if item.object is not None]
+                hsf = [item for item in attachments if item.kind == 'HSF']
+                missing_hsf = sum(item.object is None for item in hsf)
+                missing_msds = sum(item.object is None for item in attachments if item.kind == 'MSDS')
+                self.log(f'发现 {len(attachments)} 处 Numbers 附件图标，匹配 {len(objs)} 份，详见 Numbers附件核对.xlsx')
+                if missing_msds:
+                    self.log(f'{missing_msds} 处 MSDS 附件缺少可用 PDF', 'WARN')
+                if not hsf or missing_hsf:
+                    message = (f'缺少 {missing_hsf} 处检测报告的原始 PDF' if hsf else '未识别到检测报告图标')
+                    message += '，已输出 Numbers附件核对.xlsx。请补齐原始 PDF 后重新生成。'
+                    self.res.errors.append(message)
+                    self.log(message, 'ERROR')
+                    self._write_log()
+                    return self.res
+            else:
+                if st.columns == Settings().columns:
+                    st = self.st = sheet.st = replace(st, columns=sheet.detect_columns())
+                objs = extract_embedded_objects(self.src_path, st.sheet_name)
+                self.log(f'共发现内嵌对象 {len(objs)} 个')
         except Exception as e:
             self.log(traceback.format_exc(), 'ERROR')
             self.res.errors.append(f'源表读取失败：{e}')
             return self.res
         pdfs = [o for o in objs if is_pdf(o)]
-        self.log(f'共发现内嵌对象 {len(objs)} 个，其中 PDF {len(pdfs)} 个')
+        self.log(f'可用 PDF {len(pdfs)} 个')
         if not pdfs:
             self.res.errors.append('源表中没有内嵌 PDF，无法生成结果')
-            return self.res
-
-        try:
-            sheet = SourceSheet(self.src_path, st)
-            if st.columns == Settings().columns:
-                st = self.st = sheet.st = replace(st, columns=sheet.detect_columns())
-        except Exception:
-            self.log(traceback.format_exc(), 'ERROR')
-            self.res.errors.append('源表工作表读取失败')
             return self.res
 
         self.log('列位：' + '，'.join(f'{label}={get_column_letter(col+1)}' for label,col in (

@@ -2,7 +2,7 @@
 """命令行入口（无 GUI 时的批处理模式，也用于自测）。
 
 用法：
-    python run_cli.py <源.xls> <模板.xlsx> <输出目录> [--prefix RR12345]
+    python run_cli.py <源表> <模板.xlsx> <输出目录> [--prefix RR12345] [--pdf-dir 原始报告文件夹]
 
 --prefix 可选。源文件名里能抓到 RR 编号时不需要它；抓不到时必须给，
 否则中止（2026-08-31：不再硬编码兜底）。
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import argparse
 import sys
 import time
 
@@ -22,27 +23,20 @@ from hsf.pipeline import Pipeline
 
 
 def main(argv: list):
-    args = [a for a in argv[1:] if not a.startswith('--')]
-    prefix = None
-    if '--prefix' in argv:
-        i = argv.index('--prefix')
-        if i + 1 < len(argv):
-            prefix = argv[i + 1]
-    elif '-p' in argv:
-        i = argv.index('-p')
-        if i + 1 < len(argv):
-            prefix = argv[i + 1]
-
-    if len(args) < 3:
-        print(__doc__)
-        return 2
-    src, tpl, out = args[0], args[1], args[2]
+    parser = argparse.ArgumentParser(description='从 Excel 或 Numbers 材料成分表生成均质导入表。')
+    parser.add_argument('source', help='材料成分表')
+    parser.add_argument('template', help='均质创建导入模板 .xlsx')
+    parser.add_argument('output', help='输出目录')
+    parser.add_argument('-p', '--prefix', help='手动指定芯片编号')
+    parser.add_argument('--pdf-dir', help='Numbers 原始报告文件夹')
+    args = parser.parse_args(argv[1:])
     t0 = time.time()
 
     def progress(msg, pct):
         print(f'[{pct:3d}%] {msg}', flush=True)
 
-    p = Pipeline(src, tpl, out, Settings(), progress, prefix_override=prefix)
+    p = Pipeline(args.source, args.template, args.output, Settings(), progress,
+                 prefix_override=args.prefix, pdf_dir=args.pdf_dir)
     res = p.run()
     print('-' * 70)
     for e in res.errors:
@@ -53,7 +47,7 @@ def main(argv: list):
         for w in r.warnings:
             print(f'WARN  [{r.name}] {w}', flush=True)
     print(f'生成表 {res.n_xlsx} 份，HSF PDF {res.n_hsf} 份，MSDS PDF {res.n_msds} 份')
-    print(f'耗时 {time.time() - t0:.1f}s -> {out}')
+    print(f'耗时 {time.time() - t0:.1f}s -> {args.output}')
     return 1 if res.errors else 0
 
 

@@ -1,12 +1,14 @@
 """Identify the container, never trust the filename extension."""
 from pathlib import Path
-from zipfile import is_zipfile
+from zipfile import ZipFile, is_zipfile
 
 TSD_MESSAGE = ('文件经过企业加密（TSD），无法直接读取。请在有权限的原环境中解密导出，'
                '再选择未加密的 Excel 文件，并保留内嵌 PDF；修改扩展名不能解密。')
 
 
 def workbook_format(path: str) -> str:
+    if (Path(path) / 'Index' / 'Document.iwa').is_file():
+        return 'numbers'
     with open(path, 'rb') as f:
         header = f.read(32)
     if header.startswith(b'%TSD-Header'):
@@ -18,5 +20,10 @@ def workbook_format(path: str) -> str:
                 raise ValueError('Excel 文件有打开密码，请先用 Excel 解密另存为，再重试。')
         return 'xls'
     if is_zipfile(path):
-        return 'xlsx'
-    raise ValueError(f'{Path(path).name} 不是可读取的 Excel 文件，可能已加密或损坏。')
+        with ZipFile(path) as archive:
+            names = set(archive.namelist())
+        if 'xl/workbook.xml' in names:
+            return 'xlsx'
+        if 'Index/Document.iwa' in names:
+            return 'numbers'
+    raise ValueError(f'{Path(path).name} 不是可读取的 Excel 或 Numbers 文件，可能已加密或损坏。')

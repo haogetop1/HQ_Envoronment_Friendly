@@ -2,7 +2,7 @@
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = collect_data_files('tkinterdnd2')
+datas = collect_data_files('tkinterdnd2') + collect_data_files('numbers_parser')
 template = Path('assets/均质创建导入模板.xlsx')
 if template.is_file():
     datas.append((str(template), 'assets'))
@@ -16,5 +16,5 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='HSFHelper',
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='HSFHelper')
 app = BUNDLE(coll, name='HSF均质表助手.app', bundle_identifier='local.hsf.macassistant',
     info_plist={'CFBundleName':'HSF均质表助手', 'CFBundleDisplayName':'HSF均质表助手',
-                'CFBundleShortVersionString':'1.0.1', 'CFBundleVersion':'2',
+                'CFBundleShortVersionString':'1.1.0', 'CFBundleVersion':'3',
                 'NSHighResolutionCapable':True, 'LSMinimumSystemVersion':'14.0'})
