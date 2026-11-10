@@ -12,6 +12,7 @@ import unicodedata
 
 from numbers_parser import Document
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
 from openpyxl.utils.cell import range_boundaries, get_column_letter
 from pypdf import PdfReader
 
@@ -61,6 +62,7 @@ class NumbersSheet:
         if len(candidates) != 1:
             raise ValueError('Numbers 中未找到唯一的材料成分表。请保留一张含材料型号、成分、CAS、重量、检测报告和 MSDS 表头的表。')
         sheet, self.table, self.merged_cells, row, columns = candidates[0]
+        self.name = sheet.name
         self.settings = replace(settings, header_row=row, data_start_row=row + 1, columns=columns)
         self.nrows, self.ncols = self.table.num_rows, self.table.num_cols
         # Pinned parser API: the public table interface does not expose drawable geometry.
@@ -206,6 +208,38 @@ def _resolve_pdf(files, label):
     except Exception:
         return None, '同名 PDF 无法读取或仍为图标预览'
     return data, '已匹配原始 PDF'
+
+
+def write_converted_xlsx(path, numbers_sheet):
+    """Copy the material table at its original coordinates, with cached cell values."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = re.sub(r'[\\/*?:\[\]]', '_', numbers_sheet.name)[:31] or '材料成分表'
+    table = numbers_sheet.table
+    wrapped = Alignment(wrap_text=True, vertical='center')
+    header = Font(bold=True)
+    for row in range(numbers_sheet.nrows):
+        sheet.row_dimensions[row + 1].height = table.row_height(row)
+        for col in range(numbers_sheet.ncols):
+            native = table.cell(row, col)
+            value = native.value
+            if value is None:
+                continue
+            cell = sheet.cell(row + 1, col + 1, value)
+            if isinstance(value, str):
+                cell.data_type = 's'
+                cell.alignment = wrapped
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                if str(native.formatted_value).rstrip().endswith(('%', '％')):
+                    cell.number_format = '0.00%'
+            if row <= numbers_sheet.settings.header_row:
+                cell.font = header
+    for col in range(numbers_sheet.ncols):
+        sheet.column_dimensions[get_column_letter(col + 1)].width = table.col_width(col) / 5.25
+    for top, bottom, left, right in numbers_sheet.merged_cells:
+        sheet.merge_cells(start_row=top + 1, end_row=bottom, start_column=left + 1, end_column=right)
+    sheet.freeze_panes = sheet.cell(numbers_sheet.settings.data_start_row + 1, 1)
+    workbook.save(path)
 
 
 def write_audit(path, source, attachments):

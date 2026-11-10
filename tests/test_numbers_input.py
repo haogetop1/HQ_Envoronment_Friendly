@@ -2,6 +2,7 @@ import io
 import hashlib
 from pathlib import Path
 import shutil
+from datetime import datetime
 
 from numbers_parser import Document
 from numbers_parser.generated.TSDArchives_pb2 import ImageArchive
@@ -22,6 +23,8 @@ def numbers_fixture(path: Path):
                        10:'SGS检测报告', 12:'MSDS'}.items():
         table.write(3, col, value)
     table.write(4, 3, 'Leadframe')
+    table.write(4, 11, datetime(2026, 10, 1))
+    table.write(0, 0, '=literal text')
     for row, material, cas, mass in [(4, 'Copper', '7440-50-8', 1), (5, 'Tin', '7440-31-5', 3)]:
         for col, val in {5:material, 6:cas, 7:mass}.items():
             table.write(row, col, val)
@@ -76,8 +79,23 @@ def test_numbers_icon_does_not_become_report(tmp_path, template):
     output = tmp_path/'output'
     result = Pipeline(str(source), str(template), str(output)).run()
     assert result.errors and result.n_xlsx == 0
+    converted = load_workbook(result.converted_xlsx).active
+    assert converted['D5'].value == 'Leadframe'
+    assert converted['H6'].value == 3
+    assert converted['L5'].value == datetime(2026, 10, 1)
+    assert converted['A1'].value == '=literal text' and converted['A1'].data_type == 's'
+    assert {str(span) for span in converted.merged_cells.ranges} >= {'K5:K6', 'M5:M6'}
     audit = load_workbook(output/'Numbers附件核对.xlsx', data_only=True)
     assert list(audit['附件核对'].values)[1][3:5] == ('Report One.pdf', '缺少原始 PDF')
+
+
+def test_numbers_conversion_needs_no_template_or_chip_prefix(tmp_path):
+    source = tmp_path/'材料成分表.numbers'
+    numbers_fixture(source)
+    result = Pipeline(str(source), '', str(tmp_path/'output')).run()
+    assert not result.errors
+    assert Path(result.converted_xlsx).is_file()
+    assert result.n_xlsx == 0
 
 
 def test_numbers_sidecar_originals_fill_template(tmp_path, template):

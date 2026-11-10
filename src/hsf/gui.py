@@ -84,7 +84,7 @@ class App:
         ttk.Entry(reports, textvariable=self.pdf_dir_var).pack(side='left', fill='x', expand=True)
         ttk.Button(reports, text='选择…', width=10, command=self.pick_pdf_dir).pack(side='left', padx=(6, 0))
 
-        ttk.Label(top, text='2  选择均质创建导入模板（.xlsx）',
+        ttk.Label(top, text='2  选择导入模板（Numbers 仅转 Excel 时可留空）',
                   font=('PingFang SC', 13, 'bold')).pack(anchor='w', pady=(10, 0))
         f2 = ttk.Frame(top)
         f2.pack(fill='x', pady=(2, 0))
@@ -285,10 +285,6 @@ class App:
             return '请选择有效的 Excel 或 Numbers 材料成分表'
         if os.path.splitext(src)[1].lower() not in SOURCE_EXTENSIONS:
             return '源表必须是 .xls、.xlsx、.numbers 或 .number'
-        if not tpl or not os.path.isfile(tpl):
-            return '请选择有效的均质创建导入模板 (.xlsx)'
-        if os.path.splitext(tpl)[1].lower() != '.xlsx':
-            return '模板必须是 .xlsx 文件'
         if not out:
             return '请选择输出目录'
         try:
@@ -296,7 +292,10 @@ class App:
             pdf_dir = self.pdf_dir_var.get().strip()
             if source_format == 'numbers' and pdf_dir and not os.path.isdir(pdf_dir):
                 return '原始报告文件夹不存在'
-            validate_template(tpl)
+            if tpl or source_format != 'numbers':
+                if not os.path.isfile(tpl) or os.path.splitext(tpl)[1].lower() != '.xlsx':
+                    return '请选择有效的均质创建导入模板 (.xlsx)'
+                validate_template(tpl)
         except Exception as e:
             return str(e)
         return None
@@ -330,7 +329,7 @@ class App:
 
         # 芯片编号预检：抓不到就先问清楚再开工（2026-08-31）
         prefix = self.prefix_var.get().strip() or extract_prefix(self.src_var.get())
-        if not prefix:
+        if not prefix and self.tpl_var.get():
             prefix = self._ask_prefix(self.src_var.get())
             if not prefix:
                 messagebox.showwarning(
@@ -418,7 +417,12 @@ class App:
                 n_warn += 1
                 self.log(f'WARN  [{rec.name}] {w}', 'WARN')
 
-        if res.errors:
+        if res.converted_xlsx and not res.n_xlsx:
+            status = '已转换源表为 .xlsx'
+            if res.errors:
+                status += '，均质导入表未生成，详见告警'
+            self.status_var.set(status)
+        elif res.errors:
             self.status_var.set(f'生成未完成：{len(res.errors)} 个错误，'
                                 f'耗时 {elapsed:.1f}s')
             self.log(f'完成（含 {len(res.errors)} 个致命错误），耗时 {elapsed:.1f}s',

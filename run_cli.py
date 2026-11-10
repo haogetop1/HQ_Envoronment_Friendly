@@ -25,7 +25,7 @@ from hsf.pipeline import Pipeline
 def main(argv: list):
     parser = argparse.ArgumentParser(description='从 Excel 或 Numbers 材料成分表生成均质导入表。')
     parser.add_argument('source', help='材料成分表')
-    parser.add_argument('template', help='均质创建导入模板 .xlsx')
+    parser.add_argument('template', nargs='?', default='', help='均质创建导入模板 .xlsx；Numbers 仅转换时可省略')
     parser.add_argument('output', help='输出目录')
     parser.add_argument('-p', '--prefix', help='手动指定芯片编号')
     parser.add_argument('--pdf-dir', help='Numbers 原始报告文件夹')
@@ -39,6 +39,8 @@ def main(argv: list):
                  prefix_override=args.prefix, pdf_dir=args.pdf_dir)
     res = p.run()
     print('-' * 70)
+    if res.converted_xlsx:
+        print(f'已转换源表：{res.converted_xlsx}', flush=True)
     for e in res.errors:
         print('ERROR:', e, flush=True)
     # 告警与 GUI / 日志口径一致：每条单独一行，带物料名（exe 的 --cli 模式

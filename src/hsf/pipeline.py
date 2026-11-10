@@ -100,6 +100,7 @@ def apply_rules(results: dict, rec_warns: list):
 @dataclass
 class RunResult:
     out_dir: str = ''
+    converted_xlsx: str = ''
     records: list = field(default_factory=list)
     logs: list = field(default_factory=list)
     errors: list = field(default_factory=list)
@@ -177,7 +178,8 @@ class Pipeline:
         st = self.st
         try:
             source_format = workbook_format(self.src_path)
-            validate_template(self.tpl_path)
+            if source_format != 'numbers':
+                validate_template(self.tpl_path)
         except Exception as e:
             self.res.errors.append(str(e))
             return self.res
@@ -187,8 +189,9 @@ class Pipeline:
             self.res.errors.append(f'输出目录不可创建：{e}')
             return self.res
 
-        prefix = self._resolve_prefix()
-        if not prefix:
+        convert_only = source_format == 'numbers' and not self.tpl_path
+        prefix = '' if convert_only else self._resolve_prefix()
+        if not prefix and not convert_only:
             self.res.errors.append(
                 '未能确定芯片编号（源文件名中找不到 RR 编号，且未提供有效输入），已中止')
             return self.res
@@ -202,8 +205,16 @@ class Pipeline:
         try:
             sheet = SourceSheet(self.src_path, st)
             if source_format == 'numbers':
-                from .numbers_source import write_audit
+                from .numbers_source import write_audit, write_converted_xlsx
                 st = self.st = sheet.st
+                converted = Path(self.out_dir) / (safe_name(Path(self.src_path).stem) + '-转换.xlsx')
+                write_converted_xlsx(converted, sheet.sheet)
+                self.res.converted_xlsx = str(converted)
+                self.log(f'Numbers 源表已转换为：{converted.name}')
+                if convert_only:
+                    self._write_log()
+                    return self.res
+                validate_template(self.tpl_path)
                 attachments = sheet.sheet.attachments(sheet, self.pdf_dir)
                 write_audit(Path(self.out_dir) / 'Numbers附件核对.xlsx', sheet, attachments)
                 objs = [item.object for item in attachments if item.object is not None]
