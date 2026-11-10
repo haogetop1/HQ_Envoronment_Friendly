@@ -2,16 +2,21 @@
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from datetime import datetime, time
 from io import BytesIO
 from itertools import accumulate
 from pathlib import Path
 import re
 from shutil import copyfile, copytree
+from subprocess import run
 from tempfile import TemporaryDirectory
 import unicodedata
 
 from numbers_parser import Document
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils.cell import range_boundaries, get_column_letter
 from pypdf import PdfReader
@@ -133,7 +138,7 @@ class NumbersSheet:
                     name = filenames.get(obj.data.identifier, '')
                     if name.lower().endswith('.pdf'):
                         data = self.store.file_store.get('Data/' + name)
-                        yield obj_id, left + geo.size.width / 2, top + geo.size.height / 2, name, data
+                        yield obj_id, left, top, geo.size.width, geo.size.height, name, data
 
         yield from walk(self.drawables)
 
@@ -143,9 +148,10 @@ class NumbersSheet:
         files = _pdf_index(pdf_dir)
         start, end = source.detect_data_range()
         attachments = []
-        for obj_id, x, y, name, data in self._pdf_drawings():
+        for obj_id, left, top, width, height, name, data in self._pdf_drawings():
             # Floating Numbers images have no Excel anchors. Use the center of the drawing.
-            col, row = bisect_right(cols, x) - 1, bisect_right(rows, y) - 1
+            col = bisect_right(cols, left + width / 2) - 1
+            row = bisect_right(rows, top + height / 2) - 1
             if col not in (columns.hsf, columns.msds) or not start <= row <= end:
                 continue
             kind = 'HSF' if col == columns.hsf else 'MSDS'
@@ -222,12 +228,46 @@ def _resolve_pdf(files, label):
     return data, '已匹配原始 PDF'
 
 
+def _add_pdf_previews(sheet, numbers_sheet, directory):
+    """Embed visible drawings as PNGs, as Numbers does when exporting to Excel."""
+    drawings = list(numbers_sheet._pdf_drawings())
+    if not drawings:
+        return
+    rows, cols = numbers_sheet._grid()
+    for obj_id, x, y, width, height, name, data in drawings:
+        if not data or not data.startswith(b'%PDF-') or width <= 0 or height <= 0:
+            raise ValueError(f'Numbers PDF 对象无法导出：{name}')
+        pdf = directory / f'{obj_id}.pdf'
+        png = pdf.with_suffix('.png')
+        pdf.write_bytes(data)
+        result = run(['/usr/bin/sips', '-s', 'format', 'png', str(pdf), '--out', str(png)],
+                     capture_output=True, timeout=30)
+        if result.returncode or not png.is_file():
+            raise ValueError(f'Numbers PDF 对象无法渲染：{name}')
+        x, y = max(x, cols[0]), max(y, rows[0])
+        col = min(bisect_right(cols, x) - 1, len(cols) - 2)
+        row = min(bisect_right(rows, y) - 1, len(rows) - 2)
+        # Numbers geometry is in points; Excel drawing coordinates are EMUs.
+        image = Image(BytesIO(png.read_bytes()))
+        image.anchor = OneCellAnchor(
+            _from=AnchorMarker(col=col, row=row, colOff=round((x - cols[col]) * 12700),
+                               rowOff=round((y - rows[row]) * 12700)),
+            ext=XDRPositiveSize2D(round(width * 12700), round(height * 12700)))
+        sheet.add_image(image)
+
+
 def write_converted_xlsx(path, numbers_sheet):
-    """Copy the material table at its original coordinates, with cached cell values."""
+    """Copy the material table and its PDF object previews at their original coordinates."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = re.sub(r'[\\/*?:\[\]]', '_', numbers_sheet.name)[:31] or '材料成分表'
     table = numbers_sheet.table
+    date_columns = {
+        col for row in range(numbers_sheet.settings.header_row + 1)
+        for col, value in enumerate(_headers(table, numbers_sheet.merged_cells, row))
+        if re.search(r'testdate|检测时间|检测日期', re.sub(r'\s+', '', str(value or '')).casefold())
+    }
+    date_widths = {}
     wrapped = Alignment(wrap_text=True, vertical='center')
     header = Font(bold=True)
     for row in range(numbers_sheet.nrows):
@@ -241,17 +281,28 @@ def write_converted_xlsx(path, numbers_sheet):
             if isinstance(value, str):
                 cell.data_type = 's'
                 cell.alignment = wrapped
+            elif col in date_columns and isinstance(value, datetime):
+                has_time = value.time() != time.min
+                cell.number_format = 'yyyy/mm/dd hh:mm:ss' if has_time else 'yyyy/mm/dd'
+                date_widths[col] = max(date_widths.get(col, 0), 25 if has_time else 16)
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 if str(native.formatted_value).rstrip().endswith(('%', '％')):
                     cell.number_format = '0.00%'
             if row <= numbers_sheet.settings.header_row:
                 cell.font = header
     for col in range(numbers_sheet.ncols):
-        sheet.column_dimensions[get_column_letter(col + 1)].width = table.col_width(col) / 5.25
+        sheet.column_dimensions[get_column_letter(col + 1)].width = max(
+            table.col_width(col) / 5.25, date_widths.get(col, 0))
     for top, bottom, left, right in numbers_sheet.merged_cells:
         sheet.merge_cells(start_row=top + 1, end_row=bottom, start_column=left + 1, end_column=right)
     sheet.freeze_panes = sheet.cell(numbers_sheet.settings.data_start_row + 1, 1)
-    workbook.save(path)
+    path = Path(path)
+    with TemporaryDirectory(prefix='hsf-export-', dir=path.parent) as temp:
+        directory = Path(temp)
+        _add_pdf_previews(sheet, numbers_sheet, directory)
+        staged = directory / 'converted.xlsx'
+        workbook.save(staged)
+        staged.replace(path)
 
 
 def write_audit(path, source, attachments):

@@ -16,3 +16,4 @@ cryptography>=3.1        # pypdf 解密 AES 加密的 PDF；
 # 缺失时自动降级为纯按钮选择，不影响功能
 tkinterdnd2>=0.3
 numbers-parser==4.22.2   # 读取 Numbers 表格、合并区域和图标布局
+pillow>=10               # 将 PDF 对象的预览图嵌入转换后的 Excel

@@ -3,6 +3,8 @@ import hashlib
 from pathlib import Path
 import shutil
 from datetime import datetime
+from zipfile import ZipFile
+from xml.etree import ElementTree
 
 import hsf.numbers_source as numbers_source
 from numbers_parser import Document
@@ -24,8 +26,10 @@ def numbers_fixture(path: Path, *, split_report_header=False):
                        12:'MSDS'}.items():
         table.write(3, col, value)
     table.write(2 if split_report_header else 3, 10, 'SGS检测报告')
+    table.write(3, 11, 'SGS test date\n检测时间')
     table.write(4, 3, 'Leadframe')
     table.write(4, 11, datetime(2026, 10, 1))
+    table.write(5, 11, datetime(2026, 10, 2, 9, 30))
     table.write(0, 0, '=literal text')
     for row, material, cas, mass in [(4, 'Copper', '7440-50-8', 1), (5, 'Tin', '7440-31-5', 3)]:
         for col, val in {5:material, 6:cas, 7:mass}.items():
@@ -98,6 +102,27 @@ def test_numbers_conversion_needs_no_template_or_chip_prefix(tmp_path):
     assert not result.errors
     assert Path(result.converted_xlsx).is_file()
     assert result.n_xlsx == 0
+    exported = load_workbook(result.converted_xlsx).active
+    assert exported['L5'].value == datetime(2026, 10, 1)
+    assert exported['L5'].number_format == 'yyyy/mm/dd'
+    assert exported['L6'].value == datetime(2026, 10, 2, 9, 30)
+    assert exported['L6'].number_format == 'yyyy/mm/dd hh:mm:ss'
+    assert exported.column_dimensions['L'].width >= 25
+
+
+def test_numbers_conversion_preserves_visible_pdf_objects(tmp_path):
+    source = tmp_path/'RR10000.numbers'
+    numbers_fixture(source)
+    result = Pipeline(str(source), '', str(tmp_path/'output')).run()
+    assert not result.errors
+    ns = {'d': 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing'}
+    with ZipFile(result.converted_xlsx) as book:
+        drawings = ElementTree.fromstring(book.read('xl/drawings/drawing1.xml'))
+        anchors = drawings.findall('d:oneCellAnchor', ns)
+        assert [(a.findtext('d:from/d:col', namespaces=ns),
+                 a.findtext('d:from/d:row', namespaces=ns)) for a in anchors] == [
+                     ('10', '4'), ('12', '4')]
+        assert len([n for n in book.namelist() if n.startswith('xl/media/')]) == 2
 
 
 def test_numbers_sidecar_originals_fill_template_from_saved_xlsx(tmp_path, template, monkeypatch):

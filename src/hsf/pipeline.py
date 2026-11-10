@@ -219,7 +219,7 @@ class Pipeline:
                 self.progress('从转换后的 Excel 读取材料成分和重量', 8)
                 sheet = SourceSheet(str(converted), st)
                 self.log(f'均质导入表的数据源：{converted.name}')
-                # The export keeps cell coordinates but has no floating attachment icons.
+                # Rendered previews are not report files; match the source objects to originals.
                 attachments = numbers_sheet.attachments(sheet, self.pdf_dir)
                 write_audit(Path(self.out_dir) / 'Numbers附件核对.xlsx', sheet, attachments)
                 objs = [item.object for item in attachments if item.object is not None]
