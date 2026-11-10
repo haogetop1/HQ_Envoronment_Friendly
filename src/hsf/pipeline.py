@@ -207,15 +207,20 @@ class Pipeline:
             if source_format == 'numbers':
                 from .numbers_source import write_audit, write_converted_xlsx
                 st = self.st = sheet.st
+                numbers_sheet = sheet.sheet
                 converted = Path(self.out_dir) / (safe_name(Path(self.src_path).stem) + '-转换.xlsx')
-                write_converted_xlsx(converted, sheet.sheet)
+                write_converted_xlsx(converted, numbers_sheet)
                 self.res.converted_xlsx = str(converted)
                 self.log(f'Numbers 源表已转换为：{converted.name}')
                 if convert_only:
                     self._write_log()
                     return self.res
                 validate_template(self.tpl_path)
-                attachments = sheet.sheet.attachments(sheet, self.pdf_dir)
+                self.progress('从转换后的 Excel 读取材料成分和重量', 8)
+                sheet = SourceSheet(str(converted), st)
+                self.log(f'均质导入表的数据源：{converted.name}')
+                # The export keeps cell coordinates but has no floating attachment icons.
+                attachments = numbers_sheet.attachments(sheet, self.pdf_dir)
                 write_audit(Path(self.out_dir) / 'Numbers附件核对.xlsx', sheet, attachments)
                 objs = [item.object for item in attachments if item.object is not None]
                 hsf = [item for item in attachments if item.kind == 'HSF']

@@ -16,5 +16,5 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='HSFHelper',
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='HSFHelper')
 app = BUNDLE(coll, name='HSF均质表助手.app', bundle_identifier='local.hsf.macassistant',
     info_plist={'CFBundleName':'HSF均质表助手', 'CFBundleDisplayName':'HSF均质表助手',
-                'CFBundleShortVersionString':'1.1.1', 'CFBundleVersion':'4',
+                'CFBundleShortVersionString':'1.1.2', 'CFBundleVersion':'5',
                 'NSHighResolutionCapable':True, 'LSMinimumSystemVersion':'14.0'})

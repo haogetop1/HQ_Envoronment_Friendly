@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 from datetime import datetime
 
+import hsf.numbers_source as numbers_source
 from numbers_parser import Document
 from numbers_parser.generated.TSDArchives_pb2 import ImageArchive
 from openpyxl import load_workbook
@@ -16,12 +17,13 @@ from hsf.config import Settings
 from test_mac_port import pdf_bytes, template
 
 
-def numbers_fixture(path: Path):
+def numbers_fixture(path: Path, *, split_report_header=False):
     doc = Document(sheet_name='材料成分表', num_rows=8, num_cols=13)
     table = doc.default_table
     for col, value in {3:'材料名称/型号', 5:'材料成分', 6:'CAS 编号', 7:'材料成份重量',
-                       10:'SGS检测报告', 12:'MSDS'}.items():
+                       12:'MSDS'}.items():
         table.write(3, col, value)
+    table.write(2 if split_report_header else 3, 10, 'SGS检测报告')
     table.write(4, 3, 'Leadframe')
     table.write(4, 11, datetime(2026, 10, 1))
     table.write(0, 0, '=literal text')
@@ -63,7 +65,7 @@ def numbers_fixture(path: Path):
 
 def test_numbers_reads_merges_and_header_with_alias(tmp_path):
     path = tmp_path/'RR10000.numbers'
-    numbers_fixture(path)
+    numbers_fixture(path, split_report_header=True)
     alias = tmp_path/'RR10000.number'
     shutil.copyfile(path, alias)
     assert workbook_format(str(alias)) == 'numbers'
@@ -98,19 +100,28 @@ def test_numbers_conversion_needs_no_template_or_chip_prefix(tmp_path):
     assert result.n_xlsx == 0
 
 
-def test_numbers_sidecar_originals_fill_template(tmp_path, template):
+def test_numbers_sidecar_originals_fill_template_from_saved_xlsx(tmp_path, template, monkeypatch):
     source = tmp_path/'RR10000.numbers'
     numbers_fixture(source)
     pdf_dir = tmp_path/'reports'
     pdf_dir.mkdir()
     (pdf_dir/'Report One.pdf').write_bytes(pdf_bytes(pb='17'))
     (pdf_dir/'Safety Sheet.pdf').write_bytes(pdf_bytes())
+    write = numbers_source.write_converted_xlsx
+
+    def update_saved_weight(path, source_sheet):
+        write(path, source_sheet)
+        converted = load_workbook(path)
+        converted.active['H6'] = 4
+        converted.save(path)
+
+    monkeypatch.setattr(numbers_source, 'write_converted_xlsx', update_saved_weight)
     output = tmp_path/'output'
     result = Pipeline(str(source), str(template), str(output), pdf_dir=str(pdf_dir)).run()
     assert not result.errors
     assert (result.n_xlsx, result.n_hsf, result.n_msds) == (1, 1, 1)
     sheet = load_workbook(result.records[0].out_xlsx, data_only=True).worksheets[0]
-    assert [sheet['E6'].value, sheet['E7'].value] == [25, 75]
+    assert [sheet['E6'].value, sheet['E7'].value] == [20, 80]
     assert sheet['C18'].value == 'CANEC2612345678'
     assert str(sheet['B15'].value) == '17'
 

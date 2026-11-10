@@ -52,11 +52,23 @@ class NumbersSheet:
         for sheet in document.sheets:
             for table in sheet.tables:
                 merges = list(_merge_spans(table))
+                previous = []
                 for row in range(min(20, table.num_rows)):
-                    columns = columns_for_headers(_headers(table, merges, row), settings.columns)
+                    values = _headers(table, merges, row)
+                    columns = columns_for_headers(values, settings.columns)
+                    if columns is None and previous:
+                        # Some imports leave the report label one row above the Chinese header.
+                        with_report = [
+                            '检测报告' if not value and re.fullmatch(
+                                r'(?:sgs|hsf|rohs)(?:检测报告)?|检测报告',
+                                re.sub(r'\s+', '', str(above or '')).casefold()) else value
+                            for value, above in zip(values, previous)
+                        ]
+                        columns = columns_for_headers(with_report, settings.columns)
                     if columns is not None:
                         candidates.append((sheet, table, merges, row, columns))
                         break
+                    previous = values
         preferred = [entry for entry in candidates if entry[0].name == settings.sheet_name]
         candidates = preferred or candidates
         if len(candidates) != 1:
